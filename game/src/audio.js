@@ -61,12 +61,17 @@ export const sfx = {
   unlock() {
     ensure();
     if (ctx && ctx.state === 'suspended') ctx.resume();
+    startAmbient();
   },
   shot(kind) {
-    // kind: 'pistol' | 'smg' | 'rifle' | 'sniper' | 'enemy'
+    // kind: 'pistol' | 'smg' | 'rifle' | 'sniper' | 'shotgun' | 'repeater' |
+    // 'lmg' | 'enemy'
     if (kind === 'sniper') burst(0.28, 900, 0.9);
     else if (kind === 'rifle') burst(0.14, 1600, 0.7);
     else if (kind === 'smg') burst(0.09, 2200, 0.5);
+    else if (kind === 'shotgun') { burst(0.35, 500, 1.0); burst(0.12, 2600, 0.5); }
+    else if (kind === 'repeater') burst(0.2, 1000, 0.8);
+    else if (kind === 'lmg') burst(0.12, 1400, 0.65);
     else if (kind === 'enemy') burst(0.12, 1100, 0.35);
     else burst(0.12, 1900, 0.6);
   },
@@ -115,4 +120,61 @@ export const sfx = {
   step() {
     burst(0.05, 300, 0.06);
   },
+  // Round horn: two low tones on the first round's Play click, so the match
+  // opens with a sound instead of silence.
+  horn() {
+    tone(98, 0.5, 0.3, 'sawtooth', 98);
+    setTimeout(() => tone(147, 0.6, 0.28, 'sawtooth', 147), 180);
+  },
+  // Kill confirm: a short rising pair, distinct from the hit tick.
+  killSting() {
+    tone(1046, 0.07, 0.2, 'sine');
+    setTimeout(() => tone(1568, 0.12, 0.2, 'sine'), 70);
+  },
+  // Plant complete: a two-tone alarm that says the round just changed.
+  plantComplete() {
+    tone(880, 0.12, 0.22, 'square');
+    setTimeout(() => tone(880, 0.12, 0.22, 'square'), 160);
+    setTimeout(() => tone(1174, 0.2, 0.22, 'square'), 320);
+  },
 };
+
+// The foundry never goes quiet: a low two-oscillator drone (the furnace) plus
+// random ember crackle ticks on a slow timer. One interval, one voice at a
+// time, started once on the first user gesture — never before, or the browser
+// refuses the AudioContext.
+let ambientStarted = false;
+let crackleTimer = 0;
+
+function startAmbient() {
+  if (ambientStarted || !ensure()) return;
+  ambientStarted = true;
+  const oscA = ctx.createOscillator();
+  oscA.type = 'sine';
+  oscA.frequency.value = 55;
+  const oscB = ctx.createOscillator();
+  oscB.type = 'sine';
+  oscB.frequency.value = 55.6;
+  const droneGain = ctx.createGain();
+  droneGain.gain.value = 0.045;
+  const filter = ctx.createBiquadFilter();
+  filter.type = 'lowpass';
+  filter.frequency.value = 220;
+  oscA.connect(filter);
+  oscB.connect(filter);
+  filter.connect(droneGain);
+  droneGain.connect(master);
+  oscA.start();
+  oscB.start();
+  // Slow breathing on the drone gain, so the hum feels alive, not looped.
+  const lfo = ctx.createOscillator();
+  lfo.frequency.value = 0.07;
+  const lfoGain = ctx.createGain();
+  lfoGain.gain.value = 0.015;
+  lfo.connect(lfoGain);
+  lfoGain.connect(droneGain.gain);
+  lfo.start();
+  crackleTimer = window.setInterval(() => {
+    if (Math.random() < 0.6) burst(0.03 + Math.random() * 0.05, 1800 + Math.random() * 2400, 0.04 + Math.random() * 0.05, 'bandpass');
+  }, 900);
+}

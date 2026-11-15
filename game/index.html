@@ -61,6 +61,7 @@
   #timer.urgent { color: var(--accent); }
   #score { font-size: 14px; color: var(--muted); margin-top: 2px; }
   #score b { color: var(--ink); font-weight: 600; }
+  #map-chip { font-size: 12px; color: var(--accent); margin-top: 2px; letter-spacing: .08em; text-transform: uppercase; }
   #alive { font-size: 12px; color: var(--muted); margin-top: 2px; }
   #objective { width: 260px; margin: 10px auto 0; }
   #objective-label { font-size: 12px; color: var(--accent); margin-bottom: 4px; }
@@ -119,7 +120,7 @@
   .overlay { position: fixed; inset: 0; display: grid; place-items: center; padding: 24px;
     background: color-mix(in srgb, var(--canvas) 86%, transparent); }
   .overlay[hidden] { display: none; }
-  .panel { width: min(460px, 100%); padding: 32px; background: var(--surface); border: 1px solid var(--hairline); border-radius: var(--radius-panel); }
+  .panel { width: min(560px, 100%); padding: 32px; background: var(--surface); border: 1px solid var(--hairline); border-radius: var(--radius-panel); }
   .panel h1 { margin: 0 0 8px; font-size: 32px; line-height: 1.15; font-weight: 600; letter-spacing: -0.02em; }
   .panel h1 .ember { color: var(--accent); }
   .panel p { margin: 0 0 24px; max-width: 46ch; font-size: 16px; line-height: 1.5; color: var(--muted); }
@@ -131,6 +132,15 @@
   .keys li { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .keys kbd { min-width: 24px; padding: 2px 6px; border: 1px solid var(--hairline); border-radius: var(--radius-panel);
     font-family: var(--font-readout); font-size: 12px; color: var(--ink); text-align: center; }
+
+  #map-select { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 0 0 20px; }
+  .map-card { display: grid; gap: 4px; text-align: left; padding: 12px; background: transparent;
+    border: 1px solid var(--hairline); border-radius: var(--radius-control); color: var(--ink);
+    font: inherit; cursor: pointer; }
+  .map-card:hover { border-color: var(--ink); }
+  .map-card.selected { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
+  .map-name { font-weight: 600; font-size: 15px; }
+  .map-desc { font-size: 12px; color: var(--muted); line-height: 1.4; }
 
   @media (prefers-reduced-motion: reduce) {
     #hitmarker, #damage, #play { transition-duration: 0.01ms; }
@@ -149,6 +159,7 @@
   <div id="topbar">
     <div id="timer"><span id="timer-value">1:40</span></div>
     <div id="score">Vanguard <b id="score-value">0 — 0</b> Ember</div>
+    <div id="map-chip">Foundry Yard</div>
     <div id="alive"><span id="alive-value">V 4 · E 4</span></div>
     <div id="objective" hidden>
       <div id="objective-label">Planting…</div>
@@ -179,7 +190,7 @@
 
   <div id="buy" hidden>
     <h2>Buy — freeze time</h2>
-    <p>Press <b>B</b> to close. Keys 1–4 buy. Money: <span id="buy-money">$800</span></p>
+    <p>Press <b>B</b> to close. Keys 1–7 buy. Money: <span id="buy-money">$800</span></p>
     <div id="buy-list"></div>
   </div>
 </div>
@@ -187,7 +198,8 @@
 <div id="overlay" class="overlay">
   <section class="panel" role="dialog" aria-modal="true" aria-labelledby="overlay-title">
     <h1 id="overlay-title">EMBER<span class="ember">LINE</span></h1>
-    <p id="overlay-copy">Round-based tactical strike in the Foundry Yard. Plant the charge at Foundry or Depot — or eliminate the Ember Cell. Click to play.</p>
+    <p id="overlay-copy">Round-based tactical strike. Plant the charge at two sites — or eliminate the Ember Cell. Pick an arena, then click to play.</p>
+    <div id="map-select" role="group" aria-label="Choose an arena"></div>
     <button id="play" type="button">Click to play</button>
     <ul class="keys">
       <li><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> Move</li>

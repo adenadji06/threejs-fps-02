@@ -7,7 +7,7 @@ import { WEAPONS, GRENADE, BUY_ORDER } from './weapons.js';
 const COPY = {
   start: {
     title: 'EMBERLINE',
-    copy: 'Round-based tactical strike in the Foundry Yard. Plant the charge at Foundry or Depot — or eliminate the Ember Cell. Click to play.',
+    copy: 'Round-based tactical strike. Plant the charge at two sites — or eliminate the Ember Cell. Pick an arena, then click to play.',
     action: 'Click to play',
   },
   paused: {
@@ -57,8 +57,10 @@ export function createHud() {
   const damage = $('damage');
   const dmgNum = $('dmgnum');
   const hint = $('hint');
+  const mapChip = $('map-chip');
   const hitTimerHolder = { id: 0 };
   const dmgTimerHolder = { id: 0 };
+  const introTimerHolder = { id: 0 };
   let lastGap = -1;
 
   let last = {};
@@ -125,6 +127,46 @@ export function createHud() {
     },
     setAlive(vanguard, ember) {
       setText(aliveValue, 'alive', `V ${vanguard} · E ${ember}`);
+    },
+    // The arena chip under the score: the map name is always visible, so a
+    // player who joins mid-match knows where they are without asking.
+    setMap(name) {
+      if (mapChip) setText(mapChip, 'map', name);
+    },
+    // Round intro: the banner shows the round and the arena for 2.2 s, then
+    // clears itself. It never runs while a round-end banner is up.
+    showIntro(titleText, subText) {
+      if (!banner.hidden) return;
+      setText(bannerTitle, 'banner', titleText);
+      setText(bannerSub, 'bannerSub', subText);
+      banner.classList.remove('good', 'bad');
+      banner.hidden = false;
+      clearTimeout(introTimerHolder.id);
+      introTimerHolder.id = setTimeout(() => { banner.hidden = true; }, 2200);
+    },
+    // Map select on the start overlay: two cards, one per arena. The click
+    // handler lives in main.js (it reloads with ?map=), this only wires it
+    // and marks the selected card.
+    buildMapSelect(maps, selectedId, onSelect) {
+      const wrap = $('map-select');
+      if (!wrap) return;
+      wrap.innerHTML = '';
+      for (const map of maps) {
+        const card = document.createElement('button');
+        card.type = 'button';
+        card.className = `map-card${map.id === selectedId ? ' selected' : ''}`;
+        card.dataset.map = map.id;
+        card.innerHTML = `<span class="map-name">${map.name}</span><span class="map-desc">${map.tagline}</span>`;
+        card.addEventListener('click', () => onSelect(map.id));
+        wrap.appendChild(card);
+      }
+    },
+    markMap(selectedId) {
+      const wrap = $('map-select');
+      if (!wrap) return;
+      for (const card of wrap.querySelectorAll('.map-card')) {
+        card.classList.toggle('selected', card.dataset.map === selectedId);
+      }
     },
     setFeed(feed) {
       // Cheap change key (length + first line) so the 60 Hz call below does

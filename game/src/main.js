@@ -2,12 +2,14 @@
 // display's rate. EMBERLINE is a round-based tactical FPS: Vanguard (you + 3
 // bots) attacks, the Ember Cell (4 bots) defends two sites. Win a round by
 // eliminating the other team, detonating a planted charge, or — as defenders —
-// defusing it or running the clock out. Money between rounds buys guns.
+// defusing it or running the clock out. Money between rounds buys guns from a
+// seven-weapon arsenal. Two arenas — Foundry Yard and Ember Works — picked on
+// the start screen (?map=foundry|works) and played for the whole match.
 // ?shot=start|play|end with &seed=N sets up a deterministic frame for a capture,
 // renders it twice, then freezes it and sets window.__shotReady.
 import * as THREE from 'three';
 import { PALETTE } from './palette.js';
-import { createWorld, SITES } from './world.js';
+import { createWorld, MAP_LIST } from './world.js';
 import { createInput } from './input.js';
 import { createPlayer } from './player.js';
 import { createArsenal, WEAPONS, GRENADE, BUY_ORDER } from './weapons.js';
@@ -21,6 +23,10 @@ const PLANT_SECONDS = 3;
 const params = new URLSearchParams(window.location.search);
 const shot = params.get('shot');
 const seed = Number.parseInt(params.get('seed') ?? '1', 10) || 1;
+// The arena is chosen before anything is built: the world, the bots' routes
+// and the player spawn all come from the same map table, so ?map=works builds
+// a different game from ?map=foundry with no other code changing.
+const mapId = params.get('map') === 'works' ? 'works' : 'foundry';
 // In capture mode the player cannot die: the frame must show a live game.
 const godMode = !!shot;
 
@@ -50,9 +56,10 @@ const camera = new THREE.PerspectiveCamera(74, window.innerWidth / window.innerH
 scene.add(camera);
 
 const state = createState();
-const world = createWorld(scene);
+const world = createWorld(scene, mapId);
 const hud = createHud();
-const player = createPlayer(world.colliders, [0, 15.5]);
+hud.setMap(world.name);
+const player = createPlayer(world.colliders, world.playerSpawn);
 const arsenal = createArsenal(camera, world.colliders);
 const input = createInput(renderer.domElement, onLockChange);
 const raycaster = new THREE.Raycaster();
@@ -71,6 +78,8 @@ let trauma = 0; // camera shake, 0..1
 let prevFiring = false;
 let buyOpen = false;
 let plantBeepT = 0;
+let lastStepX = 0;
+let lastStepZ = 0;
 
 const body = player.state;
 const shootables = world.shootables.concat([]); // world meshes; bot meshes added per shot
@@ -88,6 +97,7 @@ const bots = createBots(scene, world, {
       state.kills += 1;
       award(state, REWARD_KILL);
       hud.setMoney(state.money);
+      sfx.killSting();
     }
     if (state.defuser === bot) state.defuser = null;
   },
@@ -113,8 +123,8 @@ const bots = createBots(scene, world, {
 allTargets = shootables.concat(bots.hitMeshes);
 
 function siteOf(position) {
-  for (const key of Object.keys(SITES)) {
-    const site = SITES[key];
+  for (const key of Object.keys(world.sites)) {
+    const site = world.sites[key];
     const d = Math.hypot(position.x - site.center.x, position.z - site.center.z);
     if (d <= site.radius) return key;
   }
@@ -124,7 +134,7 @@ function siteOf(position) {
 function startRound() {
   resetRound(state);
   bots.reset(state.round);
-  player.respawn([0, 15.5]);
+  player.respawn(world.playerSpawn);
   arsenal.refill();
   health = 100;
   playerAlive = true;
@@ -140,6 +150,7 @@ function startRound() {
   hud.setTimer(BUY_TIME);
   hud.setAlive(4, 4);
   hud.setHint('Freeze time — buy with B, then push a site.');
+  hud.showIntro(`Round ${state.round}`, `${world.name} — plant at Site ${world.sites.A.name} or ${world.sites.B.name}.`);
   syncWeaponHud();
 }
 
@@ -209,31 +220,46 @@ function shoot(spread) {
     sfx.dryFire();
     return false;
   }
-  camera.getWorldDirection(direction);
-  direction.x += (random() * 2 - 1) * spread;
-  direction.y += (random() * 2 - 1) * spread;
-  direction.z += (random() * 2 - 1) * spread;
-  direction.normalize();
-  scene.updateMatrixWorld(true);
-  raycaster.set(camera.position, direction);
-  const hit = raycaster.intersectObjects(allTargets, false)[0];
-  const endPoint = hit ? hit.point : tempVec.copy(camera.position).addScaledVector(direction, 60);
-  arsenal.muzzleWorld(muzzlePos);
-  arsenal.tracer(muzzlePos, endPoint);
-  if (hit) arsenal.impact(hit.point);
-  if (hit && hit.object.userData.bot) {
-    const bot = hit.object.userData.bot;
-    const def = arsenal.def();
-    const head = hit.object.userData.part === 'head';
-    const dmg = Math.round(def.damage * (head ? def.headMult : 1));
-    const killed = bots.damage(bot, dmg, { isPlayer: true, position: body.position });
-    hud.hitMarker(killed, shot ? 4000 : 90, head);
-    hud.showDamage(dmg, head);
-    sfx.hit(killed);
-    if (killed) trauma = Math.min(1, trauma + 0.15);
+  const def = arsenal.def();
+  // A shotgun fires one ray per pellet through the same spread cone, so the
+  // pattern lands where the crosshair points and each pellet can headshot on
+  // its own. Every other gun fires exactly one ray. One tracer follows the
+  // centre ray; the pellets share it so the screen never fills with lines.
+  const pellets = def.pellets || 1;
+  let anyHit = false;
+  let anyKill = false;
+  for (let p = 0; p < pellets; p += 1) {
+    camera.getWorldDirection(direction);
+    direction.x += (random() * 2 - 1) * spread;
+    direction.y += (random() * 2 - 1) * spread;
+    direction.z += (random() * 2 - 1) * spread;
+    direction.normalize();
+    scene.updateMatrixWorld(true);
+    raycaster.set(camera.position, direction);
+    const hit = raycaster.intersectObjects(allTargets, false)[0];
+    const endPoint = hit ? hit.point : tempVec.copy(camera.position).addScaledVector(direction, 60);
+    if (p === 0) {
+      arsenal.muzzleWorld(muzzlePos);
+      arsenal.tracer(muzzlePos, endPoint);
+    }
+    if (hit) {
+      anyHit = true;
+      arsenal.impact(hit.point);
+      if (hit.object.userData.bot) {
+        const bot = hit.object.userData.bot;
+        const head = hit.object.userData.part === 'head';
+        const dmg = Math.round(def.damage * (head ? def.headMult : 1));
+        const killed = bots.damage(bot, dmg, { isPlayer: true, position: body.position });
+        if (killed) anyKill = true;
+        hud.hitMarker(killed, shot ? 4000 : 90, head);
+        hud.showDamage(dmg, head);
+      }
+    }
   }
+  if (anyHit) sfx.hit(anyKill);
+  if (anyKill) trauma = Math.min(1, trauma + 0.15);
   arsenal.pullTrigger();
-  sfx.shot(arsenal.def().kind);
+  sfx.shot(def.kind);
   player.recoil(arsenal.recoil() + random() * 0.003, arsenal.recoilYaw());
   trauma = Math.min(1, trauma + 0.12);
   syncWeaponHud();
@@ -348,9 +374,22 @@ hud.onPlay(() => {
     input.requestLock();
     return;
   }
+  // The round horn fires on the click itself: the gesture unlocks audio, so
+  // the match opens with a sound instead of silence.
+  if (state.phase === PHASE.BUY && state.round === 1) sfx.horn();
   input.requestLock();
 });
 hud.buildBuy(buyItem);
+// The arena picker: a card click reloads the page on the other map, which
+// rebuilds the world, the routes and the spawns from that map's table. A
+// reload is deliberate — rebuilding a live world under the bots and the
+// player would be a second, buggier code path for the same result.
+hud.buildMapSelect(MAP_LIST, mapId, (id) => {
+  if (id === mapId) return;
+  const url = new URL(window.location.href);
+  url.searchParams.set('map', id);
+  window.location.href = url.toString();
+});
 
 function step(dt) {
   state.elapsed += dt;
@@ -393,6 +432,16 @@ function step(dt) {
     const look = input.takeLook();
     player.look(look.x, look.y);
     player.step(dt, input.state.keys, input.state.ads);
+    // Footsteps: one quiet tick every 2.4 m of travel, so movement has a
+    // sound without a sound per frame. Tracked on the sim position, not the
+    // render loop, so the cadence matches the stride.
+    const stepDx = body.position.x - lastStepX;
+    const stepDz = body.position.z - lastStepZ;
+    if (Math.hypot(stepDx, stepDz) > 2.4) {
+      lastStepX = body.position.x;
+      lastStepZ = body.position.z;
+      sfx.step();
+    }
   } else {
     // Freeze time still lets the player look around; a paused game eats no input.
     const look = input.takeLook();
@@ -435,10 +484,11 @@ function step(dt) {
       else hud.hideBuy();
     }
     if (buyOpen && state.phase === PHASE.BUY) {
-      if (input.wasPressed('Digit1')) buyItem('hornet');
-      if (input.wasPressed('Digit2')) buyItem('longbow');
-      if (input.wasPressed('Digit3')) buyItem('needle');
-      if (input.wasPressed('Digit4')) buyItem('grenade');
+      // Digits buy in menu order: 1-6 are the six buyable guns, 7 is the grenade.
+      for (let i = 0; i < BUY_ORDER.length; i += 1) {
+        if (input.wasPressed(`Digit${i + 1}`)) buyItem(BUY_ORDER[i]);
+      }
+      if (input.wasPressed('Digit7')) buyItem('grenade');
     }
 
     // Planting: hold E inside a site while carrying the charge.
@@ -463,7 +513,7 @@ function step(dt) {
           hud.hideObjective();
           hud.setHint(`Charge planted at Site ${site} — defend it.`);
           pushFeed(state, `Charge planted at Site ${site}`, 'vanguard');
-          sfx.plantBeep();
+          sfx.plantComplete();
           state.defuser = bots.nearestDefender(site);
         }
       } else {
@@ -510,6 +560,8 @@ function step(dt) {
 
   arsenal.step(dt, player.groundSpeed(), input.state.ads);
   arsenal.stepGrenades(dt, explodeDamage);
+  // Ambient world motion: the dust cloud bobs, the furnace light breathes.
+  world.step(dt, state.elapsed);
 
   // Bots move and fight whenever a round is live or planted; frozen in buy time.
   if (live) {
@@ -628,7 +680,7 @@ function runShot(name) {
   body.pitch = 0;
   if (name === 'start') {
     // Spawn vista: the yard, the mid container and both lanes ahead, allies in view.
-    player.respawn([0, 15.5]);
+    player.respawn(world.playerSpawn);
     bots.reset(1);
     bots.bots[0].position.set(-4, 0, 9);
     bots.bots[0].yaw = 0;
@@ -728,6 +780,8 @@ syncCamera();
 window.__emberDebug = () => ({
   phase: state.phase,
   round: state.round,
+  map: world.mapId,
+  weapons: Object.keys(WEAPONS).length,
   money: state.money,
   health,
   playerAlive,

@@ -14,9 +14,23 @@ export const WEAPONS = {
   hornet: { name: 'Hornet SMG', kind: 'smg', price: 900, damage: 22, headMult: 3, mag: 24, reserveMax: 96, fireGap: 0.085, auto: true, reloadTime: 1.8, spreadStill: 0.006, spreadMove: 0.032, recoil: 0.006, bloom: 0.005, zoom: 1, barrel: 0.3 },
   longbow: { name: 'Longbow Rifle', kind: 'rifle', price: 2400, damage: 34, headMult: 3, mag: 30, reserveMax: 90, fireGap: 0.096, auto: true, reloadTime: 1.9, spreadStill: 0.0022, spreadMove: 0.028, recoil: 0.01, bloom: 0.004, zoom: 1, barrel: 0.42 },
   needle: { name: 'Needle DMR', kind: 'sniper', price: 3600, damage: 88, headMult: 2.2, mag: 5, reserveMax: 20, fireGap: 1.1, auto: false, reloadTime: 2.6, spreadStill: 0.0008, spreadMove: 0.05, recoil: 0.03, bloom: 0.012, zoom: 2.2, barrel: 0.55 },
+  // Raptor-12: a pump shotgun. Eight pellets per trigger pull, devastating
+  // inside 8 m, useless past 20 m — the close-corner gun. pellets: 8 is read
+  // by main.js, which fires one ray per pellet through the same spread cone.
+  raptor: { name: 'Raptor-12', kind: 'shotgun', price: 1500, damage: 13, pellets: 8, headMult: 2, mag: 6, reserveMax: 30, fireGap: 0.95, auto: false, reloadTime: 2.4, spreadStill: 0.012, spreadMove: 0.045, recoil: 0.028, bloom: 0.014, zoom: 1, barrel: 0.5 },
+  // Viper Repeater: a lever-action marksman rifle. One hard hit per pull
+  // (46 damage, 3.2x headshot), a fast follow-up, an 8-round tube — the
+  // mid-range duellist between the Longbow's spray and the Needle's one-shot.
+  viper: { name: 'Viper Repeater', kind: 'repeater', price: 1900, damage: 46, headMult: 3.2, mag: 8, reserveMax: 32, fireGap: 0.34, auto: false, reloadTime: 2.2, spreadStill: 0.0016, spreadMove: 0.04, recoil: 0.018, bloom: 0.008, zoom: 1.5, barrel: 0.5 },
+  // Mauler LMG: 75 rounds of sustained fire, the wall of lead for holding a
+  // lane. The price is the slow reload (3.4 s), the heavy recoil and the
+  // movement penalty — it rewards a planted position, not a sprint.
+  mauler: { name: 'Mauler LMG', kind: 'lmg', price: 3200, damage: 26, headMult: 2.5, mag: 75, reserveMax: 150, fireGap: 0.105, auto: true, reloadTime: 3.4, spreadStill: 0.008, spreadMove: 0.04, recoil: 0.011, bloom: 0.006, zoom: 1.15, barrel: 0.5 },
 };
 export const GRENADE = { name: 'Ember HE', price: 300, max: 2, damage: 95, radius: 6, fuse: 1.15 };
-export const BUY_ORDER = ['hornet', 'longbow', 'needle'];
+// Buy order is price order, so the menu reads as a ladder: cheap SMG, then the
+// close-range and mid-range specialists, then the heavy guns.
+export const BUY_ORDER = ['hornet', 'raptor', 'viper', 'longbow', 'mauler', 'needle'];
 
 const GRAVITY = 14;
 
@@ -112,6 +126,33 @@ export function createArsenal(camera, colliders) {
       const mag = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.16, 0.07), dark);
       mag.position.set(0, -0.12, 0.02);
       model.add(mag);
+    }
+    if (def.kind === 'shotgun') {
+      // Wide twin barrels and a pump grip under them: the silhouette says
+      // "close-range" before the first shot.
+      const barrel2 = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.04, def.barrel), grip);
+      barrel2.position.set(0.045, 0.025, -0.2 - def.barrel / 2);
+      const pump = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.05, 0.14), dark);
+      pump.position.set(0, -0.03, -0.28);
+      model.add(barrel2, pump);
+    }
+    if (def.kind === 'lmg') {
+      // A drum box under the receiver and a carry handle on top: the gun
+      // looks like it holds 75 rounds because it does.
+      const drum = new THREE.Mesh(new THREE.BoxGeometry(0.11, 0.12, 0.12), dark);
+      drum.position.set(0, -0.11, 0.02);
+      const handle = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.05, 0.24), grip);
+      handle.position.set(0, 0.075, -0.02);
+      model.add(drum, handle);
+    }
+    if (def.kind === 'repeater') {
+      // A lever loop under the receiver and a long slim barrel: the classic
+      // marksman silhouette, distinct from the Needle's scope.
+      const lever = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.09, 0.02), dark);
+      lever.position.set(0, -0.1, 0.1);
+      const loop = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.02, 0.1), dark);
+      loop.position.set(0, -0.14, 0.1);
+      model.add(lever, loop);
     }
   }
 

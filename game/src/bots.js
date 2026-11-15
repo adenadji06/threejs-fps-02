@@ -3,21 +3,37 @@
 // with a line-of-sight ray, fire aimed bursts, investigate gunfire they hear, and
 // the nearest living defender walks in to defuse a planted charge. One shared
 // raycaster and a handful of reused vectors: no allocation in the hot loop.
+//
+// Four bot classes make the squads read as a team, not seven copies: a Rusher
+// flanks and pushes, a Marksman holds a lane and fires rarely but accurately, a
+// Breacher closes to shotgun range, and a Heavy (Ember only) walks through fire
+// with 160 HP. Each class has its own speed, health, reaction delay, aim error,
+// damage and burst length — the numbers below are the whole difference, and
+// they are what the player learns to read in a fight.
 import * as THREE from 'three';
 import { PALETTE } from './palette.js';
-import { WAYPOINTS as WP, ROUTES as RT } from './world.js';
 import { sfx } from './audio.js';
 
 const BOT_NAMES = {
   vanguard: ['Vex', 'Halo', 'Rook'],
   ember: ['Ash', 'Cinder', 'Flint', 'Soot'],
 };
-const BOT_HEALTH = 100;
-const WALK_SPEED = 3.4;
+const BOT_CLASSES = {
+  vanguard: ['rusher', 'marksman', 'breacher'],
+  ember: ['marksman', 'rusher', 'breacher', 'heavy'],
+};
+const CLASSES = {
+  // reaction: [min, max] seconds before the first shot of an engagement.
+  // error: base aim error in radians at the muzzle. burst: [min, max] shots.
+  // hold: [min, max] seconds holding a route end before patrolling back.
+  rusher: { name: 'Rusher', hp: 80, speed: 4.6, reaction: [0.16, 0.3], error: 0.034, damage: 24, burst: [5, 7], range: 34, hold: [0.5, 1.5], flank: true },
+  marksman: { name: 'Marksman', hp: 100, speed: 3.0, reaction: [0.35, 0.5], error: 0.014, damage: 30, burst: [2, 3], range: 60, hold: [3, 6], flank: false },
+  breacher: { name: 'Breacher', hp: 120, speed: 3.8, reaction: [0.22, 0.36], error: 0.045, damage: 26, burst: [4, 6], range: 22, hold: [1, 2], flank: false },
+  heavy: { name: 'Heavy', hp: 160, speed: 2.8, reaction: [0.26, 0.4], error: 0.02, damage: 34, burst: [4, 5], range: 42, hold: [1, 3], flank: false },
+};
 const RUSH_SPEED = 4.4;
 const EYE_HEIGHT = 1.55;
 const THINK_EVERY = 0.15;
-const FIRE_RANGE = 42;
 const FOV_COS = 0.25; // cos(~75 deg): a bot sees a 150-degree cone
 const DEFUSE_TIME = 5;
 
@@ -71,6 +87,8 @@ export function createBots(scene, world, hooks) {
   let tracerCursor = 0;
 
   function spawnBot(team, index, routeName, spawn) {
+    const clsName = BOT_CLASSES[team][index];
+    const cls = CLASSES[clsName];
     const group = new THREE.Group();
     const mat = team === 'vanguard' ? allyMat : enemyMat;
     const torso = new THREE.Mesh(torsoGeo, mat);
@@ -88,7 +106,17 @@ export function createBots(scene, world, hooks) {
       new THREE.MeshBasicMaterial({ color: new THREE.Color(PALETTE.accent), transparent: true, opacity: 0, depthWrite: false, side: THREE.DoubleSide }),
     );
     flash.position.set(0.2, 1.25, -0.62);
-    group.add(torso, head, legL, legR, gun, flash);
+    // Class stripe: a small lit bar on the chest, so the player's eye learns
+    // the class at a glance — amber for the pushers, white for the holders.
+    const stripeColor = clsName === 'marksman' || clsName === 'heavy' ? PALETTE.ink : PALETTE.accent;
+    const stripe = new THREE.Mesh(
+      new THREE.BoxGeometry(0.3, 0.08, 0.02),
+      new THREE.MeshBasicMaterial({ color: new THREE.Color(stripeColor) }),
+    );
+    stripe.position.set(0, 1.25, 0.16);
+    group.add(torso, head, legL, legR, gun, flash, stripe);
+    // The Heavy reads bigger before it reads tougher: a 12% larger silhouette.
+    if (clsName === 'heavy') group.scale.setScalar(1.12);
     group.traverse((mesh) => {
       if (mesh.isMesh) {
         mesh.castShadow = true;
@@ -101,13 +129,15 @@ export function createBots(scene, world, hooks) {
     const bot = {
       team,
       name: BOT_NAMES[team][index],
+      clsName,
+      cls,
       group,
       torso,
       head,
       flash,
       position: group.position,
       yaw: team === 'vanguard' ? Math.PI : 0,
-      health: BOT_HEALTH,
+      health: cls.hp,
       alive: true,
       routeName,
       routeIndex: 0,
@@ -117,8 +147,9 @@ export function createBots(scene, world, hooks) {
       engageT: 0, // time held on the CURRENT target
       // Reaction delay before the first shot of an engagement: a fair, readable
       // fight. Veterans react faster; nobody opens fire the instant a target
-      // pops into the cone.
-      reactionDelay: 0.22 + random() * 0.25,
+      // pops into the cone. The class sets the range: a Rusher snaps, a
+      // Marksman takes its time and then rarely misses.
+      reactionDelay: cls.reaction[0] + random() * (cls.reaction[1] - cls.reaction[0]),
       thinkT: random() * THINK_EVERY,
       fireT: 0,
       burstLeft: 0,
@@ -131,7 +162,11 @@ export function createBots(scene, world, hooks) {
       defusing: false,
       fall: 0,
       walkPhase: random() * 6,
-      speed: WALK_SPEED,
+      speed: cls.speed,
+      // Retreat: seconds left falling back toward spawn after taking a bad
+      // hit at low health. A bot that never retreats is a bot that feeds.
+      retreatT: 0,
+      flankSide: 1,
       // Unstuck recovery: last position + time spent barely moving.
       lastX: spawn[0],
       lastZ: spawn[1],
@@ -162,15 +197,16 @@ export function createBots(scene, world, hooks) {
   }
 
   function reset(round) {
-    const vSpawn = [[-2, 15.5], [0, 16.5], [2, 15.5]];
-    const eSpawn = [[-2, -15.5], [0, -16.5], [2, -15.5], [0, -14]];
+    // Spawns come from the active map, so the same reset works on both arenas.
+    const vSpawn = world.spawns.vanguard;
+    const eSpawn = world.spawns.ember;
     let vi = 0;
     let ei = 0;
     for (const bot of bots) {
       const spawn = bot.team === 'vanguard' ? vSpawn[vi++] : eSpawn[ei++];
       bot.position.set(spawn[0], 0, spawn[1]);
       bot.yaw = bot.team === 'vanguard' ? Math.PI : 0;
-      bot.health = BOT_HEALTH;
+      bot.health = bot.cls.hp;
       bot.alive = true;
       bot.target = null;
       bot.aimTime = 0;
@@ -182,6 +218,8 @@ export function createBots(scene, world, hooks) {
       bot.fall = 0;
       bot.engageT = 0;
       bot.stuckT = 0;
+      bot.retreatT = 0;
+      bot.holdT = 0;
       bot.lastX = spawn[0];
       bot.lastZ = spawn[1];
       bot.group.rotation.set(0, bot.yaw, 0);
@@ -192,18 +230,20 @@ export function createBots(scene, world, hooks) {
   }
 
   function routePoint(bot) {
-    const route = RT[bot.routeName];
+    const route = world.routes[bot.routeName];
     const name = route[Math.min(bot.routeIndex, route.length - 1)];
-    const p = WP[name];
+    const p = world.waypoints[name];
     return p;
   }
 
   function advanceRoute(bot) {
-    const route = RT[bot.routeName];
+    const route = world.routes[bot.routeName];
     if (bot.routeIndex < route.length - 1) bot.routeIndex += 1;
     else {
       // At the end of the route: hold the position, then patrol back one step.
-      bot.holdT = 2 + random() * 2;
+      // The hold length is the class's: a Marksman watches a lane for up to
+      // 6 s, a Rusher barely stops before it flanks.
+      bot.holdT = bot.cls.hold[0] + random() * (bot.cls.hold[1] - bot.cls.hold[0]);
       bot.routeIndex = Math.max(0, route.length - 2);
     }
   }
@@ -242,7 +282,9 @@ export function createBots(scene, world, hooks) {
     _eye.set(bot.position.x, bot.position.y + EYE_HEIGHT, bot.position.z);
     _to.set(tx - _eye.x, ty - _eye.y, tz - _eye.z);
     const dist = _to.length();
-    if (dist > FIRE_RANGE) return 0;
+    // Perception range is the class's: a Marksman spots across the yard, a
+    // Breacher only notices what is close enough to rush.
+    if (dist > bot.cls.range) return 0;
     _dir.copy(_to).normalize();
     // Facing check: the target must be inside the bot's forward cone.
     const fx = -Math.sin(bot.yaw);
@@ -306,7 +348,7 @@ export function createBots(scene, world, hooks) {
       return;
     }
     if (bot.burstLeft <= 0) {
-      bot.burstLeft = 3 + Math.floor(random() * 3);
+      bot.burstLeft = bot.cls.burst[0] + Math.floor(random() * (bot.cls.burst[1] - bot.cls.burst[0] + 1));
       bot.burstPause = 0;
     }
     bot.fireT -= dt;
@@ -318,9 +360,10 @@ export function createBots(scene, world, hooks) {
     const dist = bot.target.dist;
     // Aim error shrinks the longer the bot has held the target, grows with
     // range — and grows when the target is moving, so a strafing player is
-    // harder to hit than a standing one.
+    // harder to hit than a standing one. The base error is the class's: a
+    // Marksman is a laser at range, a Breacher sprays up close.
     const targetSpeed = bot.target.kind === 'player' ? (ctx.playerSpeed || 0) : 0;
-    const error = Math.max(0.008, 0.028 + dist * 0.0009 + targetSpeed * 0.0016 - bot.aimTime * 0.012);
+    const error = Math.max(0.008, bot.cls.error + dist * 0.0009 + targetSpeed * 0.0016 - bot.aimTime * 0.012);
     _eye.set(bot.position.x, bot.position.y + EYE_HEIGHT, bot.position.z);
     targetPoint(bot, _aim);
     _aim.x += (random() * 2 - 1) * error * dist;
@@ -352,7 +395,7 @@ export function createBots(scene, world, hooks) {
     if (hit && hit.object.userData.bot) {
       const victim = hit.object.userData.bot;
       const head = hit.object.userData.part === 'head';
-      const dmg = Math.round(26 * (head ? 3 : 1) * Math.max(0.5, 1 - dist / 90));
+      const dmg = Math.round(bot.cls.damage * (head ? 3 : 1) * Math.max(0.5, 1 - dist / 90));
       damage(victim, dmg, bot);
     }
     // The player's own ray is separate; a bot shooting the player is a hit on the
@@ -370,7 +413,7 @@ export function createBots(scene, world, hooks) {
         const miss = Math.hypot(p.x - cx, (p.y + 1.1) - cy, p.z - cz);
         const hitR = hooks.playerCrouching ? 0.42 : 0.55;
         if (miss < hitR && (!hit || hit.distance > along)) {
-          const dmg = Math.round(26 * Math.max(0.5, 1 - dist / 90));
+          const dmg = Math.round(bot.cls.damage * Math.max(0.5, 1 - dist / 90));
           hooks.onPlayerDamaged(dmg, bot.position);
         }
       }
@@ -411,6 +454,13 @@ export function createBots(scene, world, hooks) {
       scan(bot, ctx);
       if (bot.target) bot.aimTime = Math.min(bot.aimTime, 0.4);
       else bot.aimTime = 0;
+      // Hurt bad and still in a fight: fall back toward spawn for a couple
+      // of seconds instead of standing in the open and feeding the enemy.
+      if (bot.health < 35 && bot.target && bot.retreatT <= 0 && random() < 0.3) {
+        bot.retreatT = 2.2;
+        const spawn = world.spawns[bot.team][0];
+        bot.investigate = bot.invVec.set(spawn[0], 0, spawn[1]);
+      }
       // Hear the player's gunfire: investigate the noise.
       if (ctx.playerFiring && ctx.playerAlive && !bot.target) {
         const d = Math.hypot(ctx.playerPos.x - bot.position.x, ctx.playerPos.z - bot.position.z);
@@ -420,10 +470,21 @@ export function createBots(scene, world, hooks) {
       }
     }
 
+    // Retreating: run for the spawn, no shooting, no route — just distance.
+    if (bot.retreatT > 0) {
+      bot.retreatT -= dt;
+      if (bot.investigate) {
+        moveToward(bot, bot.investigate.x, bot.investigate.z, dt, RUSH_SPEED);
+        bot.yaw = Math.atan2(-(bot.investigate.x - bot.position.x), -(bot.investigate.z - bot.position.z));
+      }
+      bot.group.rotation.y = bot.yaw;
+      return;
+    }
+
     // Defuse duty: the nearest living defender walks to a planted charge.
     const state = hooks.state;
     if (state.phase === 'planted' && bot.team === 'ember' && state.defuser === bot) {
-      const site = state.site === 'A' ? WP.aSite : WP.bSite;
+      const site = state.site === 'A' ? world.waypoints.aSite : world.waypoints.bSite;
       const d = Math.hypot(site[0] - bot.position.x, site[1] - bot.position.z);
       if (d > 1.4) {
         moveToward(bot, site[0], site[1], dt, RUSH_SPEED);
@@ -440,15 +501,21 @@ export function createBots(scene, world, hooks) {
       // Combat: face the target, strafe, fire in bursts.
       targetPoint(bot, _aim);
       bot.yaw = Math.atan2(-(_aim.x - bot.position.x), -(_aim.z - bot.position.z));
-      bot.strafeT -= dt;
-      if (bot.strafeT <= 0) {
-        bot.strafeT = 0.8 + random() * 0.8;
-        bot.strafeDir = random() < 0.5 ? -1 : 1;
+      // A Breacher does not strafe at range: it closes the distance until
+      // the fight is inside its 10 m envelope, then it strafes like the rest.
+      if (bot.clsName === 'breacher' && bot.target.dist > 10) {
+        moveToward(bot, _aim.x, _aim.z, dt, RUSH_SPEED);
+      } else {
+        bot.strafeT -= dt;
+        if (bot.strafeT <= 0) {
+          bot.strafeT = 0.8 + random() * 0.8;
+          bot.strafeDir = random() < 0.5 ? -1 : 1;
+        }
+        const side = bot.strafeDir;
+        const tx = bot.position.x + Math.cos(bot.yaw) * side * 1.2;
+        const tz = bot.position.z - Math.sin(bot.yaw) * side * 1.2;
+        moveToward(bot, tx, tz, dt, 1.6);
       }
-      const side = bot.strafeDir;
-      const tx = bot.position.x + Math.cos(bot.yaw) * side * 1.2;
-      const tz = bot.position.z - Math.sin(bot.yaw) * side * 1.2;
-      moveToward(bot, tx, tz, dt, 1.6);
       shootAt(bot, dt, ctx);
     } else if (bot.investigate) {
       const arrived = moveToward(bot, bot.investigate.x, bot.investigate.z, dt, RUSH_SPEED);
@@ -464,6 +531,14 @@ export function createBots(scene, world, hooks) {
     } else if (bot.holdT > 0) {
       bot.holdT -= dt;
       bot.yaw += dt * 0.35;
+      if (bot.holdT <= 0 && bot.cls.flank) {
+        // A Rusher never waits twice in the same place: after holding, it
+        // cuts across to the opposite lane and comes at the site from a new
+        // angle, so the defence cannot just pre-aim one lane.
+        bot.flankSide = -bot.flankSide;
+        const cut = bot.flankSide > 0 ? world.waypoints.westCut : world.waypoints.eastCut;
+        bot.investigate = bot.invVec.set(cut[0], 0, cut[1]);
+      }
     } else {
       const point = routePoint(bot);
       const arrived = moveToward(bot, point[0], point[1], dt, bot.speed);
@@ -518,7 +593,7 @@ export function createBots(scene, world, hooks) {
       return bots.filter((b) => b.team === team && b.alive).length;
     },
     nearestDefender(siteName) {
-      const site = siteName === 'A' ? WP.aSite : WP.bSite;
+      const site = siteName === 'A' ? world.waypoints.aSite : world.waypoints.bSite;
       let best = null;
       let bestD = Infinity;
       for (const bot of bots) {
