@@ -105,6 +105,12 @@ export function createWorld(scene) {
   box(1.8, 1.4, 1.8, 3.5, 0.7, 5.5, 'hairline');
   box(1.8, 1.4, 1.8, -3.5, 0.7, -5.5, 'hairline');
   box(1.8, 1.4, 1.8, 3.5, 0.7, -5.5, 'hairline');
+  // Step crates beside the mid crates: 0.7 m high, jumpable, so the 1.4 m
+  // crates become a second sightline level instead of a wall.
+  box(1.2, 0.7, 1.2, -5.1, 0.35, 5.5, 'hairline');
+  box(1.2, 0.7, 1.2, 5.1, 0.35, 5.5, 'hairline');
+  box(1.2, 0.7, 1.2, -5.1, 0.35, -5.5, 'hairline');
+  box(1.2, 0.7, 1.2, 5.1, 0.35, -5.5, 'hairline');
 
   // Site A (Foundry): crates and a tall chimney pillar.
   box(2.2, 1.2, 2.2, -15.5, 0.6, -13.5, 'hairline');
@@ -155,6 +161,28 @@ export function createWorld(scene) {
     group.add(cord);
   }
 
+  // Floating site letters: a glance from anywhere in the yard says which
+  // site is which, so the plant objective reads without the HUD.
+  function siteLetter(letter, x, z, color) {
+    const canvas = document.createElement('canvas');
+    canvas.width = 128;
+    canvas.height = 128;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = color;
+    ctx.font = 'bold 96px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(letter, 64, 68);
+    const texture = new THREE.CanvasTexture(canvas);
+    const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, transparent: true, depthWrite: false }));
+    sprite.position.set(x, 4.8, z);
+    sprite.scale.setScalar(2.4);
+    group.add(sprite);
+    return sprite;
+  }
+  siteLetter('A', -13, -11, PALETTE.accent);
+  siteLetter('B', 13, -11, PALETTE.ally);
+
   // Light: a low dusk sun, a cool sky fill, and an ember glow over each site.
   const sky = new THREE.HemisphereLight(new THREE.Color('#a08a70'), new THREE.Color(PALETTE.canvas), 1.5);
   scene.add(sky);
@@ -162,7 +190,9 @@ export function createWorld(scene) {
   sun.position.set(14, 18, 10);
   sun.target.position.set(0, 0, -4);
   sun.castShadow = true;
-  sun.shadow.mapSize.set(2048, 2048);
+  // One shadow light, 1024^2 PCF: the whole shadow budget. 2048^2 cost the
+  // same image at twice the GPU time in peak combat.
+  sun.shadow.mapSize.set(1024, 1024);
   sun.shadow.camera.left = -24;
   sun.shadow.camera.right = 24;
   sun.shadow.camera.top = 24;

@@ -37,7 +37,7 @@ function mulberry32(initial) {
 const random = mulberry32(seed);
 
 const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5)); // adaptive tiers in perfSample() step down from here
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
@@ -75,6 +75,10 @@ let plantBeepT = 0;
 const body = player.state;
 const shootables = world.shootables.concat([]); // world meshes; bot meshes added per shot
 
+// One combined target list, built once: the old per-shot concat() allocated a
+// fresh array on every trigger pull and every bot shot.
+let allTargets = null;
+
 const bots = createBots(scene, world, {
   state,
   onBotKilled(bot, byPlayer) {
@@ -100,11 +104,13 @@ const bots = createBots(scene, world, {
       playerAlive = false;
       state.deaths += 1;
       pushFeed(state, 'You are down', 'ember');
-      hud.setHint('You are down — your squad fights on.');
+      hud.setHint('You are down — spectating your squad.');
       if (document.pointerLockElement) document.exitPointerLock();
     }
   },
 });
+
+allTargets = shootables.concat(bots.hitMeshes);
 
 function siteOf(position) {
   for (const key of Object.keys(SITES)) {
@@ -210,26 +216,25 @@ function shoot(spread) {
   direction.normalize();
   scene.updateMatrixWorld(true);
   raycaster.set(camera.position, direction);
-  const targets = shootables.concat(bots.hitMeshes);
-  const hit = raycaster.intersectObjects(targets, false)[0];
+  const hit = raycaster.intersectObjects(allTargets, false)[0];
   const endPoint = hit ? hit.point : tempVec.copy(camera.position).addScaledVector(direction, 60);
   arsenal.muzzleWorld(muzzlePos);
   arsenal.tracer(muzzlePos, endPoint);
+  if (hit) arsenal.impact(hit.point);
   if (hit && hit.object.userData.bot) {
     const bot = hit.object.userData.bot;
     const def = arsenal.def();
     const head = hit.object.userData.part === 'head';
     const dmg = Math.round(def.damage * (head ? def.headMult : 1));
     const killed = bots.damage(bot, dmg, { isPlayer: true, position: body.position });
-    hud.hitMarker(killed, shot ? 4000 : 90);
+    hud.hitMarker(killed, shot ? 4000 : 90, head);
+    hud.showDamage(dmg, head);
     sfx.hit(killed);
     if (killed) trauma = Math.min(1, trauma + 0.15);
-  } else if (hit) {
-    // A world hit stops the bullet; nothing more to show.
   }
   arsenal.pullTrigger();
   sfx.shot(arsenal.def().kind);
-  player.recoil(arsenal.recoil() + random() * 0.003, (random() * 2 - 1) * 0.004);
+  player.recoil(arsenal.recoil() + random() * 0.003, arsenal.recoilYaw());
   trauma = Math.min(1, trauma + 0.12);
   syncWeaponHud();
   return true;
@@ -257,7 +262,7 @@ function explodeDamage(center, amount, radius) {
         playerAlive = false;
         state.deaths += 1;
         pushFeed(state, 'You are down', 'ember');
-        hud.setHint('You are down — your squad fights on.');
+        hud.setHint('You are down — spectating your squad.');
         if (document.pointerLockElement) document.exitPointerLock();
       }
     }
@@ -304,6 +309,17 @@ function refreshBuyMarks() {
 }
 
 function syncCamera() {
+  // Death spectate: while down, the camera rides with the nearest living ally
+  // instead of staring at the floor — the round keeps moving and the player
+  // keeps watching it.
+  if (!playerAlive && (state.phase === PHASE.LIVE || state.phase === PHASE.PLANTED)) {
+    const ally = bots.bots.find((b) => b.team === 'vanguard' && b.alive);
+    if (ally) {
+      camera.position.set(ally.position.x, ally.position.y + 1.55, ally.position.z);
+      camera.rotation.set(0, ally.yaw, 0, 'YXZ');
+      return;
+    }
+  }
   camera.position.set(body.position.x, body.position.y + body.eye, body.position.z);
   const shake = trauma * trauma * 0.02;
   camera.rotation.set(
@@ -389,7 +405,11 @@ function step(dt) {
     if (live && def) {
       const wantFire = input.state.firing && (def.auto || !prevFiring);
       if (wantFire && arsenal.ready()) shoot(shot ? 0 : arsenal.spread(player.groundSpeed(), input.state.ads));
-      else if (wantFire && arsenal.inst() && arsenal.inst().mag === 0) shoot(0);
+      else if (wantFire && arsenal.inst() && arsenal.inst().mag === 0) {
+        // Empty mag on trigger pull: reload at once instead of dry-clicking.
+        arsenal.reload();
+        hud.setHint('Reloading…');
+      }
       if (input.wasPressed('KeyR')) arsenal.reload();
     }
     prevFiring = input.state.firing;
@@ -488,7 +508,7 @@ function step(dt) {
     }
   }
 
-  arsenal.step(dt);
+  arsenal.step(dt, player.groundSpeed(), input.state.ads);
   arsenal.stepGrenades(dt, explodeDamage);
 
   // Bots move and fight whenever a round is live or planted; frozen in buy time.
@@ -497,6 +517,7 @@ function step(dt) {
       playerAlive,
       playerPos: body.position,
       playerCrouching: body.crouching,
+      playerSpeed: player.groundSpeed(),
       playerFiring: input.state.firing && playerAlive,
       time: state.elapsed,
     });
@@ -521,6 +542,7 @@ function frame(now) {
   requestAnimationFrame(frame);
   const dt = Math.min((now - lastTime) / 1000, 0.1);
   lastTime = now;
+  perfSample(dt * 1000);
   if (!frozen && state.phase !== PHASE.MATCH) {
     accumulator += dt;
     let steps = 0;
@@ -534,6 +556,64 @@ function frame(now) {
   }
   renderer.render(scene, camera);
 }
+
+// Frame-time meter + adaptive pixel ratio (skill Q2: stable 60 fps in peak
+// combat). A 240-sample ring buffer records every frame; median/p95/p99 and
+// the count of frames over 16.67 ms are exposed on window.__emberPerf. When
+// the EMA frame time stays above 17.5 ms the pixel ratio steps down
+// (1.5 -> 1.25 -> 1.0) to buy GPU headroom; when it stays under 11 ms it
+// steps back up. The sim is fixed-step, so this never changes game speed.
+const PERF_SAMPLES = 240;
+const perfRing = new Float32Array(PERF_SAMPLES);
+let perfCursor = 0;
+let perfCount = 0;
+let perfEma = 16.67;
+let pixelTier = 0; // 0 = 1.5x, 1 = 1.25x, 2 = 1.0x
+const PIXEL_TIERS = [1.5, 1.25, 1];
+let perfTierT = 0;
+
+function perfSample(ms) {
+  perfRing[perfCursor] = ms;
+  perfCursor = (perfCursor + 1) % PERF_SAMPLES;
+  if (perfCount < PERF_SAMPLES) perfCount += 1;
+  perfEma += (ms - perfEma) * 0.05;
+  perfTierT += ms / 1000;
+  if (perfTierT < 1.5) return;
+  perfTierT = 0;
+  if (perfEma > 17.5 && pixelTier < PIXEL_TIERS.length - 1) {
+    pixelTier += 1;
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, PIXEL_TIERS[pixelTier]));
+  } else if (perfEma < 11 && pixelTier > 0) {
+    pixelTier -= 1;
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, PIXEL_TIERS[pixelTier]));
+  }
+}
+
+function perfStats() {
+  const n = perfCount;
+  if (n === 0) return { samples: 0 };
+  const sorted = Array.from(perfRing.slice(0, n)).sort((a, b) => a - b);
+  let over = 0;
+  let over33 = 0;
+  for (let i = 0; i < n; i += 1) {
+    if (sorted[i] > 16.67) over += 1;
+    if (sorted[i] > 33.33) over33 += 1;
+  }
+  const at = (q) => Math.round(sorted[Math.min(n - 1, Math.floor(q * n))] * 100) / 100;
+  return {
+    samples: n,
+    medianMs: at(0.5),
+    p95Ms: at(0.95),
+    p99Ms: at(0.99),
+    emaMs: Math.round(perfEma * 100) / 100,
+    over16ms: over,
+    over33ms: over33,
+    pixelRatio: renderer.getPixelRatio(),
+    drawCalls: renderer.info.render.calls,
+    triangles: renderer.info.render.triangles,
+  };
+}
+window.__emberPerf = perfStats;
 
 function settle(steps) {
   for (let index = 0; index < steps; index += 1) step(FIXED_STEP);
@@ -663,6 +743,7 @@ window.__emberDebug = () => ({
   weapon: arsenal.def() ? arsenal.def().name : 'grenade',
   kills: state.kills,
   feed: state.feed.map((f) => f.text),
+  perf: perfStats(),
 });
 if (shot) runShot(shot);
 else requestAnimationFrame(frame);

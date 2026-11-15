@@ -16,6 +16,12 @@ const AIR_ACCEL = 9;
 const FRICTION = 9;
 const GRAVITY = 20;
 const JUMP_SPEED = 6.2;
+// Recoil recovery: after 0.12 s without a shot the pitch kick eases back toward
+// the pre-fire aim at 0.06 rad/s, so tap-fire re-centres and spray control is a
+// skill (pull down while firing, let it settle between bursts) instead of a
+// one-way climb. Yaw kick is small and stays, so the pattern must be learned.
+const RECOIL_RECOVER_DELAY = 0.12;
+const RECOIL_RECOVER_RATE = 0.06;
 
 export function createPlayer(colliders, spawn) {
   const player = {
@@ -28,6 +34,8 @@ export function createPlayer(colliders, spawn) {
     crouching: false,
     height: STAND_HEIGHT,
     ads: false,
+    recoilPool: 0, // pitch kick not yet recovered
+    shotIdleT: 99, // seconds since the last shot
   };
   const probe = new THREE.Box3();
   const wish = new THREE.Vector3();
@@ -48,11 +56,19 @@ export function createPlayer(colliders, spawn) {
 
   function recoil(pitchKick, yawKick) {
     player.pitch = Math.min(1.45, player.pitch + pitchKick);
+    player.recoilPool = Math.min(0.35, player.recoilPool + pitchKick);
+    player.shotIdleT = 0;
     player.yaw += yawKick;
   }
 
   function step(dt, keys, ads) {
     player.ads = ads;
+    player.shotIdleT += dt;
+    if (player.shotIdleT > RECOIL_RECOVER_DELAY && player.recoilPool > 0) {
+      const recovered = Math.min(player.recoilPool, RECOIL_RECOVER_RATE * dt);
+      player.pitch = Math.max(-1.45, player.pitch - recovered);
+      player.recoilPool -= recovered;
+    }
     const crouching = keys.has('ControlLeft') || keys.has('ControlRight') || keys.has('KeyC');
     if (crouching && !player.crouching) {
       player.crouching = true;
@@ -128,6 +144,8 @@ export function createPlayer(colliders, spawn) {
       player.velocity.set(0, 0, 0);
       player.yaw = 0;
       player.pitch = 0;
+      player.recoilPool = 0;
+      player.shotIdleT = 99;
       player.crouching = false;
       player.height = STAND_HEIGHT;
       player.eye = STAND_EYE;

@@ -8,10 +8,12 @@ import { PALETTE } from './palette.js';
 import { sfx } from './audio.js';
 
 export const WEAPONS = {
-  kestrel: { name: 'Kestrel P9', kind: 'pistol', price: 0, damage: 26, headMult: 3.5, mag: 12, reserveMax: 48, fireGap: 0.16, auto: false, reloadTime: 1.4, spreadStill: 0.003, spreadMove: 0.02, recoil: 0.008, zoom: 1, barrel: 0.22 },
-  hornet: { name: 'Hornet SMG', kind: 'smg', price: 900, damage: 22, headMult: 3, mag: 24, reserveMax: 96, fireGap: 0.085, auto: true, reloadTime: 1.8, spreadStill: 0.006, spreadMove: 0.032, recoil: 0.006, zoom: 1, barrel: 0.3 },
-  longbow: { name: 'Longbow Rifle', kind: 'rifle', price: 2400, damage: 34, headMult: 3, mag: 30, reserveMax: 90, fireGap: 0.096, auto: true, reloadTime: 1.9, spreadStill: 0.0022, spreadMove: 0.028, recoil: 0.01, zoom: 1, barrel: 0.42 },
-  needle: { name: 'Needle DMR', kind: 'sniper', price: 3600, damage: 88, headMult: 2.2, mag: 5, reserveMax: 20, fireGap: 1.1, auto: false, reloadTime: 2.6, spreadStill: 0.0008, spreadMove: 0.05, recoil: 0.03, zoom: 2.2, barrel: 0.55 },
+  // bloom: extra spread added per consecutive shot (decays when not firing);
+  // the crosshair opens as the burst runs long, so burst control is visible.
+  kestrel: { name: 'Kestrel P9', kind: 'pistol', price: 0, damage: 26, headMult: 3.5, mag: 12, reserveMax: 48, fireGap: 0.16, auto: false, reloadTime: 1.4, spreadStill: 0.003, spreadMove: 0.02, recoil: 0.008, bloom: 0.004, zoom: 1, barrel: 0.22 },
+  hornet: { name: 'Hornet SMG', kind: 'smg', price: 900, damage: 22, headMult: 3, mag: 24, reserveMax: 96, fireGap: 0.085, auto: true, reloadTime: 1.8, spreadStill: 0.006, spreadMove: 0.032, recoil: 0.006, bloom: 0.005, zoom: 1, barrel: 0.3 },
+  longbow: { name: 'Longbow Rifle', kind: 'rifle', price: 2400, damage: 34, headMult: 3, mag: 30, reserveMax: 90, fireGap: 0.096, auto: true, reloadTime: 1.9, spreadStill: 0.0022, spreadMove: 0.028, recoil: 0.01, bloom: 0.004, zoom: 1, barrel: 0.42 },
+  needle: { name: 'Needle DMR', kind: 'sniper', price: 3600, damage: 88, headMult: 2.2, mag: 5, reserveMax: 20, fireGap: 1.1, auto: false, reloadTime: 2.6, spreadStill: 0.0008, spreadMove: 0.05, recoil: 0.03, bloom: 0.012, zoom: 2.2, barrel: 0.55 },
 };
 export const GRENADE = { name: 'Ember HE', price: 300, max: 2, damage: 95, radius: 6, fuse: 1.15 };
 export const BUY_ORDER = ['hornet', 'longbow', 'needle'];
@@ -62,7 +64,26 @@ export function createArsenal(camera, colliders) {
   let primaryId = null; // bought primary, or null while the pistol is the only gun
   let slot = 'pistol'; // 'primary' | 'pistol' | 'grenade'
   let grenades = 1; // every attacker spawns with one Ember HE
-  const state = { cooldown: 0, reloadLeft: 0, flash: 0, kick: 0, switching: 0 };
+  const state = { cooldown: 0, reloadLeft: 0, flash: 0, kick: 0, switching: 0, bloom: 0, burst: 0, shotGapT: 99, bobPhase: 0 };
+  // Learnable recoil: a fixed left/right pattern per consecutive shot, so the
+  // player can pull against it instead of fighting pure randomness. The pitch
+  // kick stays in the player's recoil pool (player.js recovers it after a pause).
+  const RECOIL_PATTERN = [-0.004, 0.005, -0.003, 0.006, -0.005, 0.004, -0.002, 0.003];
+  const BLOOM_MAX = 0.03;
+
+  // One reusable impact-spark pool: 12 tetrahedra, no allocation per shot.
+  // Sparks fly from the hit point and shrink away; the pool recycles the oldest.
+  const sparkGeo = new THREE.TetrahedronGeometry(0.035);
+  const sparkMat = new THREE.MeshBasicMaterial({ color: new THREE.Color(PALETTE.accent) });
+  const sparks = [];
+  for (let i = 0; i < 12; i += 1) {
+    const mesh = new THREE.Mesh(sparkGeo, sparkMat);
+    mesh.visible = false;
+    camera.parent.add(mesh);
+    sparks.push({ mesh, vel: new THREE.Vector3(), life: 0 });
+  }
+  let sparkCursor = 0;
+  const sparkDir = new THREE.Vector3();
 
   const grenadeMeshes = [];
   const grenadeGeo = new THREE.SphereGeometry(0.09, 10, 8);
@@ -118,13 +139,25 @@ export function createArsenal(camera, colliders) {
     return true;
   }
 
-  function step(dt) {
+  function step(dt, speed = 0, ads = false) {
     state.cooldown = Math.max(0, state.cooldown - dt);
     state.flash = Math.max(0, state.flash - dt);
     state.switching = Math.max(0, state.switching - dt);
+    state.shotGapT += dt;
+    // Bloom decays once the trigger is released; a burst longer than ~0.35 s
+    // without a pause keeps growing, so tap-fire stays accurate.
+    if (state.shotGapT > 0.12) state.bloom = Math.max(0, state.bloom - dt * 0.045);
+    if (state.shotGapT > 0.35) state.burst = 0;
     state.kick += (0 - state.kick) * Math.min(1, dt * 14);
-    model.position.z = -0.55 + state.kick;
-    model.position.y = -0.24 - state.switching * 0.12;
+    // Walk bob + ADS centering: the view model bobs with the stride on the move
+    // and slides to the centre of the screen while aiming down sights.
+    state.bobPhase += dt * Math.min(10, 2 + speed * 1.6);
+    const bobAmp = Math.min(1, speed / 5.2) * 0.011 * (ads ? 0.25 : 1);
+    const adsK = ads ? Math.min(1, (state.adsK ?? 0) + dt * 9) : Math.max(0, (state.adsK ?? 0) - dt * 9);
+    state.adsK = adsK;
+    model.position.z = -0.55 + state.kick + adsK * 0.08;
+    model.position.y = -0.24 - state.switching * 0.12 + Math.sin(state.bobPhase * 2) * bobAmp + adsK * 0.055;
+    model.position.x = 0.27 * (1 - adsK) + Math.cos(state.bobPhase) * bobAmp * 0.6;
     model.rotation.x = state.kick * 2.2;
     if (slot === 'grenade') model.visible = false;
     flash.visible = state.flash > 0;
@@ -148,6 +181,15 @@ export function createArsenal(camera, colliders) {
       tracer.line.material.opacity = Math.max(0, tracer.life / 0.07);
       if (tracer.life <= 0) tracer.line.visible = false;
     }
+    for (const s of sparks) {
+      if (s.life <= 0) continue;
+      s.life -= dt;
+      s.vel.y -= 9 * dt;
+      s.mesh.position.addScaledVector(s.vel, dt);
+      const k = Math.max(0.001, s.life / 0.25);
+      s.mesh.scale.setScalar(k);
+      if (s.life <= 0) s.mesh.visible = false;
+    }
   }
 
   function throwGrenade(origin, direction) {
@@ -167,9 +209,10 @@ export function createArsenal(camera, colliders) {
     return true;
   }
 
+  const _explodeCenter = new THREE.Vector3();
   function explode(index, onDamage) {
     const g = liveGrenades[index];
-    const center = g.mesh.position.clone();
+    _explodeCenter.copy(g.mesh.position);
     camera.parent.remove(g.mesh);
     liveGrenades.splice(index, 1);
     sfx.explosion();
@@ -177,7 +220,7 @@ export function createArsenal(camera, colliders) {
       new THREE.SphereGeometry(0.5, 12, 8),
       new THREE.MeshBasicMaterial({ color: new THREE.Color(PALETTE.accent), transparent: true, opacity: 0.9 }),
     );
-    flashMesh.position.copy(center);
+    flashMesh.position.copy(_explodeCenter);
     camera.parent.add(flashMesh);
     grenadeMeshes.push(flashMesh);
     setTimeout(() => {
@@ -185,7 +228,7 @@ export function createArsenal(camera, colliders) {
       flashMesh.geometry.dispose();
       flashMesh.material.dispose();
     }, 180);
-    onDamage(center, GRENADE.damage, GRENADE.radius);
+    onDamage(_explodeCenter, GRENADE.damage, GRENADE.radius);
   }
 
   function stepGrenades(dt, onDamage) {
@@ -236,9 +279,13 @@ export function createArsenal(camera, colliders) {
       return !!def && !!inst && inst.mag > 0 && state.cooldown === 0 && state.reloadLeft === 0 && state.switching === 0;
     },
     pullTrigger() {
-      state.cooldown = currentDef().fireGap;
+      const def = currentDef();
+      state.cooldown = def.fireGap;
       state.flash = 0.06;
       state.kick = 0.055;
+      state.shotGapT = 0;
+      state.burst += 1;
+      state.bloom = Math.min(BLOOM_MAX, state.bloom + def.bloom);
     },
     takeRound() {
       const inst = currentState();
@@ -256,12 +303,32 @@ export function createArsenal(camera, colliders) {
     spread(speed, ads) {
       const def = currentDef();
       if (!def) return 0;
-      const base = def.spreadStill + Math.min(1, speed / 5.2) * def.spreadMove;
+      const base = def.spreadStill + Math.min(1, speed / 5.2) * def.spreadMove + state.bloom;
       return ads ? base * 0.45 : base;
     },
     recoil() {
       const def = currentDef();
       return def ? def.recoil : 0.008;
+    },
+    // Deterministic yaw kick for this shot in the burst: the pattern repeats
+    // every 8 shots, so the player learns to pull against it.
+    recoilYaw() {
+      const def = currentDef();
+      if (!def) return 0;
+      return RECOIL_PATTERN[state.burst % RECOIL_PATTERN.length] * (def.recoil / 0.01);
+    },
+    // Burst of impact sparks at a hit point: 4 pooled tetrahedra, no allocation.
+    impact(point) {
+      for (let n = 0; n < 4; n += 1) {
+        const s = sparks[sparkCursor];
+        sparkCursor = (sparkCursor + 1) % sparks.length;
+        s.mesh.position.copy(point);
+        sparkDir.set(Math.random() * 2 - 1, Math.random() * 1.2, Math.random() * 2 - 1).normalize();
+        s.vel.copy(sparkDir).multiplyScalar(2.5 + Math.random() * 2.5);
+        s.life = 0.25;
+        s.mesh.scale.setScalar(1);
+        s.mesh.visible = true;
+      }
     },
     zoom() {
       const def = currentDef();
@@ -293,6 +360,9 @@ export function createArsenal(camera, colliders) {
       state.reloadLeft = 0;
       state.flash = 0;
       state.kick = 0;
+      state.bloom = 0;
+      state.burst = 0;
+      state.shotGapT = 99;
       slot = primaryId ? 'primary' : 'pistol';
       const def = currentDef();
       if (def) buildModel(def);

@@ -20,17 +20,28 @@ out. First team to 5 rounds takes the match.
 - **Gunplay where stopping to aim pays**: four guns (Kestrel P9 pistol,
   Hornet SMG, Longbow rifle, Needle DMR with aim-down-sights zoom), headshot
   damage, recoil and spread that punish firing on the move, acceleration,
-  crouching, jumping and full map collision.
+  crouching, jumping and full map collision. Recoil follows a learnable
+  per-burst pattern and recovers after a short pause; spread blooms as a burst
+  runs long and the crosshair opens with it; every hit shows impact sparks, a
+  hit marker (gold for headshots) and the exact damage dealt.
 - **Tactics**: a bomb plant/defuse objective, money earned each round and spent
   in a buy menu during freeze time, an Ember HE grenade with blast damage, and
   bots that walk waypoint routes, hold their site, react to gunfire, and send
-  their nearest defender in to defuse a planted charge.
+  their nearest defender in to defuse a planted charge. Bots take a human
+  reaction delay before their first shot of an engagement, miss more against a
+  moving target, and sidestep out when wedged on a corner. Going down spectates
+  the nearest living squadmate instead of ending the round for you.
 - **The map**: an original dusk foundry yard — west, east and mid lanes, a
   container block breaking the mid sightline, crates and low walls for cover,
   a chimney at Foundry and a silo at Depot.
 - **Presentation**: procedural WebAudio gunfire, beeps and explosions (no
   audio files), a full HUD (health, ammo, money, timer, score, alive counts,
   kill feed, plant/defuse bars), hit markers and a damage vignette.
+- **Performance**: fixed 60 Hz simulation apart from rendering, pooled
+  tracers/sparks/grenades with no allocation in the combat hot loop, one
+  1024² shadow light, tiered bot thinking, and an adaptive pixel ratio that
+  steps down when the frame-time EMA stays above 17.5 ms (frame stats on
+  `window.__emberPerf`).
 
 ## Controls
 

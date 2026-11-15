@@ -26,6 +26,7 @@ const _to = new THREE.Vector3();
 const _dir = new THREE.Vector3();
 const _aim = new THREE.Vector3();
 const _move = new THREE.Vector3();
+const _end = new THREE.Vector3();
 
 function mulberry32(initial) {
   let a = initial;
@@ -113,18 +114,28 @@ export function createBots(scene, world, hooks) {
       holdT: 0,
       target: null, // { kind: 'player' | 'bot', ref, pos }
       aimTime: 0,
+      engageT: 0, // time held on the CURRENT target
+      // Reaction delay before the first shot of an engagement: a fair, readable
+      // fight. Veterans react faster; nobody opens fire the instant a target
+      // pops into the cone.
+      reactionDelay: 0.22 + random() * 0.25,
       thinkT: random() * THINK_EVERY,
       fireT: 0,
       burstLeft: 0,
       burstPause: 0,
       strafeDir: 1,
       strafeT: 0,
-      investigate: null, // Vector3 or null
+      investigate: null, // pooled invVec below, or null when idle
+      invVec: new THREE.Vector3(), // preallocated investigate target: no allocation per noise event
       lookT: 0,
       defusing: false,
       fall: 0,
       walkPhase: random() * 6,
       speed: WALK_SPEED,
+      // Unstuck recovery: last position + time spent barely moving.
+      lastX: spawn[0],
+      lastZ: spawn[1],
+      stuckT: 0,
     };
     torso.userData.bot = bot;
     torso.userData.part = 'torso';
@@ -169,6 +180,10 @@ export function createBots(scene, world, hooks) {
       bot.investigate = null;
       bot.defusing = false;
       bot.fall = 0;
+      bot.engageT = 0;
+      bot.stuckT = 0;
+      bot.lastX = spawn[0];
+      bot.lastZ = spawn[1];
       bot.group.rotation.set(0, bot.yaw, 0);
       bot.group.position.y = 0;
       bot.group.visible = true;
@@ -241,6 +256,7 @@ export function createBots(scene, world, hooks) {
   }
 
   function scan(bot, ctx) {
+    const hadTarget = !!bot.target;
     bot.target = null;
     let best = Infinity;
     // Only Ember bots hunt the player: an ally must never target its own team.
@@ -259,6 +275,14 @@ export function createBots(scene, world, hooks) {
         bot.target = { kind: 'bot', ref: other, dist: d };
       }
     }
+    // A fresh engagement restarts the reaction clock and the burst: the bot
+    // must hold the target for reactionDelay before its first shot.
+    if (bot.target && !hadTarget) {
+      bot.engageT = 0;
+      bot.burstLeft = 0;
+      bot.burstPause = 0;
+      bot.fireT = 0;
+    }
   }
 
   function targetPoint(bot, out) {
@@ -270,9 +294,13 @@ export function createBots(scene, world, hooks) {
     return out;
   }
 
-  function shootAt(bot, dt) {
+  function shootAt(bot, dt, ctx) {
     if (!bot.target) return;
     bot.aimTime += dt;
+    bot.engageT += dt;
+    // Reaction delay: no shots until the bot has held the target long enough
+    // to "see" it. This is the fairness window the player uses to peek.
+    if (bot.engageT < bot.reactionDelay) return;
     if (bot.burstPause > 0) {
       bot.burstPause -= dt;
       return;
@@ -288,8 +316,11 @@ export function createBots(scene, world, hooks) {
     if (bot.burstLeft <= 0) bot.burstPause = 0.7 + random() * 0.7;
 
     const dist = bot.target.dist;
-    // Aim error shrinks the longer the bot has held the target, grows with range.
-    const error = Math.max(0.008, 0.028 + dist * 0.0009 - bot.aimTime * 0.012);
+    // Aim error shrinks the longer the bot has held the target, grows with
+    // range — and grows when the target is moving, so a strafing player is
+    // harder to hit than a standing one.
+    const targetSpeed = bot.target.kind === 'player' ? (ctx.playerSpeed || 0) : 0;
+    const error = Math.max(0.008, 0.028 + dist * 0.0009 + targetSpeed * 0.0016 - bot.aimTime * 0.012);
     _eye.set(bot.position.x, bot.position.y + EYE_HEIGHT, bot.position.z);
     targetPoint(bot, _aim);
     _aim.x += (random() * 2 - 1) * error * dist;
@@ -299,11 +330,12 @@ export function createBots(scene, world, hooks) {
     raycaster.set(_eye, _dir);
     raycaster.far = 70;
     // The shooter's own meshes are in hitMeshes: leave them out, or every shot
-    // would hit the bot's own head at the ray's origin.
-    const targets = world.shootables.concat(hitMeshes.filter((m) => m.userData.bot !== bot));
+    // would hit the bot's own head at the ray's origin. otherHitMeshes is built
+    // once per bot at spawn — the old per-shot filter() allocated every bullet.
+    const targets = world.shootables.concat(bot.otherHitMeshes);
     const hit = raycaster.intersectObjects(targets, false)[0];
     // Tracer from the bot's gun to the hit point (or 40 m out).
-    const end = hit ? hit.point : _eye.clone().addScaledVector(_dir, 40);
+    const end = hit ? hit.point : _end.copy(_eye).addScaledVector(_dir, 40);
     const t = tracers[tracerCursor];
     tracerCursor = (tracerCursor + 1) % tracers.length;
     const pos = t.line.geometry.attributes.position;
@@ -383,7 +415,7 @@ export function createBots(scene, world, hooks) {
       if (ctx.playerFiring && ctx.playerAlive && !bot.target) {
         const d = Math.hypot(ctx.playerPos.x - bot.position.x, ctx.playerPos.z - bot.position.z);
         if (d < 28 && !bot.investigate) {
-          bot.investigate = new THREE.Vector3(ctx.playerPos.x, 0, ctx.playerPos.z);
+          bot.investigate = bot.invVec.set(ctx.playerPos.x, 0, ctx.playerPos.z);
         }
       }
     }
@@ -417,7 +449,7 @@ export function createBots(scene, world, hooks) {
       const tx = bot.position.x + Math.cos(bot.yaw) * side * 1.2;
       const tz = bot.position.z - Math.sin(bot.yaw) * side * 1.2;
       moveToward(bot, tx, tz, dt, 1.6);
-      shootAt(bot, dt);
+      shootAt(bot, dt, ctx);
     } else if (bot.investigate) {
       const arrived = moveToward(bot, bot.investigate.x, bot.investigate.z, dt, RUSH_SPEED);
       bot.yaw = Math.atan2(-(bot.investigate.x - bot.position.x), -(bot.investigate.z - bot.position.z));
@@ -442,6 +474,25 @@ export function createBots(scene, world, hooks) {
     // Walk bob.
     bot.walkPhase += dt * 9;
     bot.group.position.y = Math.abs(Math.sin(bot.walkPhase)) * 0.03;
+    // Unstuck recovery: if the bot tried to move but barely did for 1.2 s, it
+    // is wedged on a corner — sidestep 2 m perpendicular and try again.
+    const moved = Math.hypot(bot.position.x - bot.lastX, bot.position.z - bot.lastZ);
+    if (moved < 0.05 && !bot.target && bot.holdT <= 0) {
+      bot.stuckT += dt;
+      if (bot.stuckT > 1.2) {
+        bot.stuckT = 0;
+        const side = random() < 0.5 ? -1 : 1;
+        bot.investigate = bot.invVec.set(
+          bot.position.x + Math.cos(bot.yaw) * side * 2,
+          0,
+          bot.position.z - Math.sin(bot.yaw) * side * 2,
+        );
+      }
+    } else {
+      bot.stuckT = 0;
+    }
+    bot.lastX = bot.position.x;
+    bot.lastZ = bot.position.z;
   }
 
   // Build the squads once; reset() re-arms them every round.
@@ -452,6 +503,11 @@ export function createBots(scene, world, hooks) {
   spawnBot('ember', 1, 'defendB', [0, -16.5]);
   spawnBot('ember', 2, 'defendMid', [2, -15.5]);
   spawnBot('ember', 3, 'defendA', [0, -14]);
+  // Per-bot target list without the bot's own meshes, built once here instead
+  // of filtering hitMeshes on every shot (see shootAt).
+  for (const bot of bots) {
+    bot.otherHitMeshes = hitMeshes.filter((m) => m.userData.bot !== bot);
+  }
 
   return {
     bots,

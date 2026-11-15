@@ -55,8 +55,11 @@ export function createHud() {
   const crosshair = $('crosshair');
   const hitmarker = $('hitmarker');
   const damage = $('damage');
+  const dmgNum = $('dmgnum');
   const hint = $('hint');
   const hitTimerHolder = { id: 0 };
+  const dmgTimerHolder = { id: 0 };
+  let lastGap = -1;
 
   let last = {};
 
@@ -124,11 +127,12 @@ export function createHud() {
       setText(aliveValue, 'alive', `V ${vanguard} · E ${ember}`);
     },
     setFeed(feed) {
-      const html = feed.map((f) => `<div class="feed-line ${f.team}">${f.text}</div>`).join('');
-      if (last.feed !== html) {
-        last.feed = html;
-        feedEl.innerHTML = html;
-      }
+      // Cheap change key (length + first line) so the 60 Hz call below does
+      // not rebuild an HTML string and touch the DOM every simulation step.
+      const key = `${feed.length}|${feed.length ? feed[0].text : ''}|${feed.length ? feed[0].team : ''}`;
+      if (last.feedKey === key) return;
+      last.feedKey = key;
+      feedEl.innerHTML = feed.map((f) => `<div class="feed-line ${f.team}">${f.text}</div>`).join('');
     },
     showBanner(text, sub, good) {
       setText(bannerTitle, 'banner', text);
@@ -167,13 +171,27 @@ export function createHud() {
       hint.hidden = !text;
     },
     setCrosshair(gapPx) {
+      // The sim calls this every step; only touch the DOM when the gap moved
+      // by half a pixel or more.
+      if (Math.abs(gapPx - lastGap) < 0.5) return;
+      lastGap = gapPx;
       crosshair.style.setProperty('--gap', `${gapPx.toFixed(1)}px`);
     },
-    hitMarker(killed, holdMs = 90) {
+    hitMarker(killed, holdMs = 90, head = false) {
       hitmarker.classList.add('on');
       hitmarker.classList.toggle('kill', killed);
+      hitmarker.classList.toggle('head', head && !killed);
       clearTimeout(hitTimerHolder.id);
-      hitTimerHolder.id = setTimeout(() => hitmarker.classList.remove('on', 'kill'), holdMs);
+      hitTimerHolder.id = setTimeout(() => hitmarker.classList.remove('on', 'kill', 'head'), holdMs);
+    },
+    // Floating damage number beside the crosshair: the exact damage of the
+    // last hit, so the player learns what each gun does per shot.
+    showDamage(amount, head) {
+      dmgNum.textContent = head ? `${amount} HEADSHOT` : String(amount);
+      dmgNum.classList.toggle('head', !!head);
+      dmgNum.classList.add('on');
+      clearTimeout(dmgTimerHolder.id);
+      dmgTimerHolder.id = setTimeout(() => dmgNum.classList.remove('on'), 650);
     },
     damageFlash() {
       damage.classList.add('on');

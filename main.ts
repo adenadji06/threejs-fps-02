@@ -9,7 +9,7 @@
 // Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for /output:
 //   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
 
-import { cpSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildDossier } from './vendor/makefun-threejs.ts';
@@ -29,3 +29,7 @@ writeFileSync(
   join(out, 'dossier.json'),
   buildDossier(out, { text_max_bytes: 163840, screenshots: { max: 4, max_bytes: 262144 }, game_max_files: 993, game_max_bytes: 50331648 }),
 );
+// One-line build receipt on stdout: dossier bytes, so a rebuild that silently
+// truncates source past the 160 KiB text cap is visible immediately (the
+// gate's dossier_matches row names what was cut).
+console.log(`dossier written: ${join(out, 'dossier.json')} (${statSync(join(out, 'dossier.json')).size} bytes)`);
